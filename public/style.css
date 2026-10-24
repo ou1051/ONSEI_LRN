@@ -1,0 +1,191 @@
+/* Anki デスクトップ版（ライト/ダーク）の配色・余白・フォントに合わせる */
+:root {
+  --canvas: #f5f5f5;
+  --canvas-elevated: #ffffff;
+  --canvas-inset: #ffffff;
+  --fg: #020202;
+  --fg-subtle: #858585;
+  --border: #c4c4c4;
+  --border-subtle: #e4e4e4;
+  --button-bg: #fcfcfc;
+  --button-hover: #ececec;
+  --accent: #2b6cb0;
+  --state-new: #3b82f6;
+  --state-learn: #dc2626;
+  --state-review: #16a34a;
+  --highlight: #e8f0fe;
+  --card-bg: #ffffff;
+  --card-fg: #000000;
+  --radius: 5px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #2c2c2c;
+    --canvas-elevated: #363636;
+    --canvas-inset: #252525;
+    --fg: #fcfcfc;
+    --fg-subtle: #a3a3a3;
+    --border: #202020;
+    --border-subtle: #454545;
+    --button-bg: #454545;
+    --button-hover: #525252;
+    --accent: #7ab3f0;
+    --state-new: #93c5fd;
+    --state-learn: #f87171;
+    --state-review: #4ade80;
+    --highlight: #3b4a5c;
+    --card-bg: #2f2f31;
+    --card-fg: #ffffff;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--canvas);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Sans", "Noto Sans JP", Meiryo, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1 { font-size: 1.3em; font-weight: 600; margin: 0 0 12px; }
+h2 { font-size: 1.1em; font-weight: 600; margin: 20px 0 8px; }
+.subtle { color: var(--fg-subtle); }
+.small { font-size: 0.9em; }
+
+/* 上部ツールバー（Anki の Decks / Add / Browse / Stats 風） */
+.toolbar {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.toolbar a { padding: 4px 10px; color: var(--fg); border-radius: var(--radius); }
+.toolbar a:hover { background: var(--button-hover); text-decoration: none; }
+.toolbar a.active { font-weight: 600; }
+
+main { max-width: 860px; margin: 0 auto; padding: 16px; }
+
+/* ボタン */
+button, .button {
+  font: inherit;
+  color: var(--fg);
+  background: var(--button-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 14px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { background: var(--button-hover); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { border-color: var(--accent); }
+.bottom-bar {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+/* デッキ一覧のような表 */
+table.decks { width: 100%; border-collapse: collapse; }
+table.decks th { text-align: left; font-weight: normal; color: var(--fg-subtle); padding: 4px 8px; }
+table.decks th.num, table.decks td.num { text-align: right; width: 64px; }
+table.decks td { padding: 4px 8px; border-top: 1px solid var(--border-subtle); }
+table.decks tr:hover td { background: var(--highlight); }
+.new { color: var(--state-new); }
+.learn { color: var(--state-learn); }
+.review { color: var(--state-review); }
+.zero { color: var(--fg-subtle); opacity: 0.5; }
+
+.panel {
+  background: var(--canvas-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 12px;
+}
+.empty { text-align: center; color: var(--fg-subtle); padding: 32px 0; }
+
+/* 説明（音声）画面 */
+.question { font-size: 20px; text-align: center; margin: 16px 0; font-family: arial, sans-serif; }
+textarea {
+  width: 100%;
+  min-height: 140px;
+  font: inherit;
+  color: var(--fg);
+  background: var(--canvas-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  resize: vertical;
+}
+.interim { color: var(--fg-subtle); min-height: 1.5em; }
+.recording { border-color: var(--state-learn); color: var(--state-learn); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--state-learn); margin-right: 6px; animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: 0.2; } }
+
+.verdict { font-weight: 600; margin-bottom: 6px; }
+.verdict.correct { color: var(--state-review); }
+.verdict.incorrect { color: var(--state-learn); }
+.mistake { border-left: 3px solid var(--state-learn); padding: 4px 10px; margin: 8px 0; }
+.mistake .quote { font-style: italic; }
+.mistake .label { color: var(--fg-subtle); font-size: 0.9em; }
+ul.tight { margin: 4px 0; padding-left: 20px; }
+details summary { cursor: pointer; color: var(--fg-subtle); }
+
+/* フラッシュカード（Anki 既定テンプレート: arial 20px 中央寄せ） */
+.card {
+  font-family: arial, sans-serif;
+  font-size: 20px;
+  text-align: center;
+  color: var(--card-fg);
+  background: var(--card-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: 24px 16px;
+  white-space: pre-wrap;
+}
+.card hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
+.answer-buttons { display: flex; justify-content: center; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.answer-buttons .btn-wrap { text-align: center; }
+.answer-buttons .ivl { font-size: 0.85em; color: var(--fg-subtle); }
+
+/* ボード */
+.board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.column { background: var(--canvas-inset); border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 8px; min-height: 120px; }
+.column h2 { margin: 0 0 8px; font-size: 1em; }
+.tile { display: block; background: var(--canvas-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 6px 8px; margin-bottom: 6px; color: var(--fg); }
+.tile:hover { background: var(--highlight); text-decoration: none; }
+.progress { height: 6px; background: var(--border-subtle); border-radius: 3px; overflow: hidden; margin: 6px 0 16px; }
+.progress > div { height: 100%; background: var(--state-review); }
+
+/* カレンダー */
+.cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.calendar { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.calendar .dow { text-align: center; color: var(--fg-subtle); font-size: 0.9em; }
+.day { min-height: 64px; border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 4px; font-size: 0.85em; background: var(--canvas-elevated); }
+.day.other { opacity: 0.35; }
+.day.today { border-color: var(--accent); }
+.day .n { color: var(--fg-subtle); }
+.heat-1 { background: color-mix(in srgb, var(--state-review) 15%, var(--canvas-elevated)); }
+.heat-2 { background: color-mix(in srgb, var(--state-review) 30%, var(--canvas-elevated)); }
+.heat-3 { background: color-mix(in srgb, var(--state-review) 50%, var(--canvas-elevated)); }
+.legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  background: var(--canvas-elevated); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px 14px; max-width: calc(100% - 32px);
+}
+.toast.error { border-color: var(--state-learn); color: var(--state-learn); }
+
+@media (max-width: 640px) {
+  .board { grid-template-columns: 1fr; }
+  .day { min-height: 48px; }
+  table.decks th.num, table.decks td.num { width: 44px; }
+}
