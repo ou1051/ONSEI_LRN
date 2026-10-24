@@ -3,7 +3,7 @@ import multer from "multer";
 import fs from "node:fs";
 import path from "node:path";
 import { db, save, newId, now, PDF_DIR } from "./lib/db.js";
-import { extractConcepts, evaluateExplanation, AIError, MOCK } from "./lib/ai.js";
+import { extractConcepts, evaluateExplanation, AIError, PROVIDER } from "./lib/ai.js";
 import { newCardState, schedule, describeDelay, RATINGS } from "./lib/srs.js";
 
 const app = express();
@@ -17,7 +17,6 @@ const upload = multer({
 });
 
 const pdfPath = (doc) => path.join(PDF_DIR, `${doc.id}.pdf`);
-const readPdf = (doc) => fs.readFileSync(pdfPath(doc)).toString("base64");
 
 const find = (list, id, res, label) => {
   const item = list.find((x) => x.id === id);
@@ -51,7 +50,7 @@ app.post("/api/docs", upload.single("pdf"), async (req, res) => {
   const doc = { id: newId(), filename: req.file.originalname, title: "", createdAt: now() };
   fs.writeFileSync(pdfPath(doc), req.file.buffer);
   try {
-    const result = await extractConcepts(req.file.buffer.toString("base64"));
+    const result = await extractConcepts(pdfPath(doc));
     doc.title = result.doc_title || doc.filename;
     db.docs.push(doc);
     result.concepts.forEach((c, i) =>
@@ -119,7 +118,7 @@ app.post("/api/concepts/:id/attempts", async (req, res) => {
   const history = all.slice(lastCorrect + 1);
 
   try {
-    const result = await evaluateExplanation({ pdfBase64: readPdf(doc), concept, transcript, history });
+    const result = await evaluateExplanation({ pdfPath: pdfPath(doc), concept, transcript, history });
     const attempt = { id: newId(), conceptId: concept.id, docId: doc.id, transcript, result, createdAt: now() };
     db.attempts.push(attempt);
     concept.attempts += 1;
@@ -203,5 +202,6 @@ app.use((err, _req, res, _next) => {
 
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, () => {
-  console.log(`ONSEI_LRN: http://localhost:${PORT}${MOCK ? "  (モックモード)" : ""}`);
+  const label = { "claude-code": "Claude Code（Proプランのログインを使用）", api: "Claude API（従量課金）", mock: "モック" }[PROVIDER];
+  console.log(`ONSEI_LRN: http://localhost:${PORT}  AI: ${label}`);
 });
