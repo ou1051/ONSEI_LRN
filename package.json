@@ -1,6 +1,6 @@
 {
   "name": "onsei-lrn",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Learn a PDF by explaining it out loud: AI feedback until you get it right, then flashcards in your own words",
   "type": "module",
@@ -8,6 +8,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
+    "test": "node --test test/unit/*.test.js test/api.test.js",
+    "test:e2e": "node test/e2e/run.mjs",
     "setup": "bash scripts/mac/install.sh",
     "uninstall": "bash scripts/mac/uninstall.sh",
     "update": "bash scripts/mac/update.sh",

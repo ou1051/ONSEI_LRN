@@ -5,6 +5,7 @@ cd "$(dirname "$0")" || exit 1
 
 # Double-clicked scripts may not get your usual PATH; add the common Node.js locations
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+# shellcheck source=/dev/null
 if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi
 
 URL="http://localhost:${PORT:-3000}"

@@ -1,5 +1,6 @@
 # Shared settings for the macOS scripts. Sourced, not run directly.
 # Written for the bash 3.2 that ships with macOS.
+# shellcheck disable=SC2034  # variables are used by the scripts that source this file
 
 LABEL="com.onsei-lrn.server"
 APP_NAME="ONSEI_LRN"

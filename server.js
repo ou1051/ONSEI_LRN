@@ -5,13 +5,34 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { db, save, newId, now, PDF_DIR } from "./lib/db.js";
 import { extractConcepts, evaluateExplanation, AIError, PROVIDER, LANGUAGES } from "./lib/ai.js";
-import { newCardState, schedule, describeDelay, RATINGS } from "./lib/srs.js";
+import { schedule, preview, describeInterval, memoryInfo, migrateCard, rescheduleDue, gradeFromAttempts, RATINGS } from "./lib/srs.js";
+import { getSettings, updateSettings } from "./lib/settings.js";
+import * as reminders from "./lib/reminders.js";
+import * as progress from "./lib/progress.js";
+import { computeStats } from "./lib/stats.js";
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "127.0.0.1";
 
 const app = express();
+
+// The app listens only on this computer, but web pages you visit could still send requests to
+// localhost. Refuse requests addressed to another host name (DNS rebinding) and changes that come
+// from another website (cross-site request forgery).
+const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", HOST].map((h) => `${h}:${PORT}`));
+app.use((req, res, next) => {
+  if (!ALLOWED_HOSTS.has(req.headers.host)) return res.status(403).json({ error: "Forbidden host" });
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    const origin = req.headers.origin;
+    const crossSite = req.headers["sec-fetch-site"] === "cross-site";
+    if (crossSite || (origin && !ALLOWED_HOSTS.has(origin.replace(/^https?:\/\//, "")))) {
+      return res.status(403).json({ error: "Requests from other websites are not allowed" });
+    }
+  }
+  next();
+});
+
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(APP_DIR, "public")));
 
@@ -30,10 +51,27 @@ const find = (list, id, res, label) => {
   return item;
 };
 
-const withCardInfo = (card) => ({
-  ...card,
-  intervals: Object.fromEntries(RATINGS.map((r) => [r, describeDelay(card, r)])),
-});
+// Cards saved by the earlier scheduler get forgetting-curve fields
+if (db.cards.some((c) => !c.stability)) {
+  db.cards.forEach(migrateCard);
+  save();
+}
+
+// Time spent, as reported by the browser, capped so a forgotten open tab does not count
+const duration = (ms, capMin) => Math.round(Math.min(Math.max(Number(ms) || 0, 0), capMin * 60 * 1000));
+
+// Card fields a review changes, kept on the review so it can be undone
+const SCHEDULE_FIELDS = ["due", "stability", "difficulty", "state", "lastReview", "reps", "lapses"];
+const snapshot = (card) => Object.fromEntries(SCHEDULE_FIELDS.map((f) => [f, card[f] ?? null]));
+
+const withCardInfo = (card) => {
+  const next = preview(card, getSettings().retention);
+  return {
+    ...card,
+    intervals: Object.fromEntries(RATINGS.map((r) => [r, describeInterval(next[r].days)])),
+    memory: memoryInfo(card),
+  };
+};
 
 app.get("/api/health", (_req, res) => res.json({ ok: true, app: "onsei-lrn", provider: PROVIDER }));
 
@@ -82,7 +120,7 @@ app.get("/api/docs/:id", (req, res) => {
 
 app.get("/api/docs/:id/pdf", (req, res) => {
   const doc = find(db.docs, req.params.id, res, "Deck");
-  if (doc) res.sendFile(pdfPath(doc));
+  if (doc) res.sendFile(pdfPath(doc), (err) => err && !res.headersSent && res.status(404).json({ error: "PDF file not found" }));
 });
 
 app.delete("/api/docs/:id", (req, res) => {
@@ -96,6 +134,7 @@ app.delete("/api/docs/:id", (req, res) => {
   db.reviews = db.reviews.filter(keep);
   fs.rmSync(pdfPath(doc), { force: true });
   save();
+  reminders.scheduleSync();
   res.json({ ok: true });
 });
 
@@ -134,7 +173,15 @@ app.post("/api/concepts/:id/attempts", async (req, res) => {
       history,
       lang: pickLang(req.body?.lang),
     });
-    const attempt = { id: newId(), conceptId: concept.id, docId: doc.id, transcript, result, createdAt: now() };
+    const attempt = {
+      id: newId(),
+      conceptId: concept.id,
+      docId: doc.id,
+      transcript,
+      result,
+      durationMs: duration(req.body?.durationMs, 30),
+      createdAt: now(),
+    };
     db.attempts.push(attempt);
     concept.attempts += 1;
 
@@ -142,17 +189,24 @@ app.post("/api/concepts/:id/attempts", async (req, res) => {
     if (result.verdict === "correct") {
       concept.status = "mastered";
       concept.masteredAt = now();
+      // Explaining it correctly counts as a review, graded by how many attempts it took
+      const grade = gradeFromAttempts(history.length + 1);
+      const fields = { front: result.card_front, back: result.card_back || transcript, updatedAt: now() };
       if (card) {
-        Object.assign(card, { front: result.card_front, back: result.card_back, updatedAt: now() });
+        Object.assign(card, fields, schedule(card, grade, getSettings().retention));
       } else {
-        card = { id: newId(), conceptId: concept.id, docId: doc.id, front: result.card_front, back: result.card_back, createdAt: now(), ...newCardState() };
+        const id = newId();
+        card = { id, conceptId: concept.id, docId: doc.id, createdAt: now(), ...fields, ...schedule({}, grade, getSettings().retention, Date.now(), id) };
         db.cards.push(card);
       }
+      db.reviews.push({ id: newId(), cardId: card.id, docId: card.docId, rating: grade, source: "explanation", createdAt: now() });
+      reminders.scheduleSync();
     } else {
       concept.status = "learning";
     }
     save();
-    res.json({ attempt, concept, card, round: history.length + 1 });
+    progress.noteActivity();
+    res.json({ attempt, concept, card: card && withCardInfo(card), round: history.length + 1 });
   } catch (err) {
     sendError(res, err);
   }
@@ -178,6 +232,7 @@ app.put("/api/cards/:id", (req, res) => {
 app.delete("/api/cards/:id", (req, res) => {
   db.cards = db.cards.filter((c) => c.id !== req.params.id);
   save();
+  reminders.scheduleSync();
   res.json({ ok: true });
 });
 
@@ -186,20 +241,120 @@ app.post("/api/cards/:id/review", (req, res) => {
   if (!card) return;
   const rating = req.body?.rating;
   if (!RATINGS.includes(rating)) return res.status(400).json({ error: "Invalid rating." });
-  Object.assign(card, schedule(card, rating));
-  db.reviews.push({ id: newId(), cardId: card.id, docId: card.docId, rating, createdAt: now() });
+  const prev = snapshot(card);
+  Object.assign(card, schedule(card, rating, getSettings().retention));
+  db.reviews.push({
+    id: newId(),
+    cardId: card.id,
+    docId: card.docId,
+    rating,
+    prev,
+    durationMs: duration(req.body?.durationMs, 5),
+    createdAt: now(),
+  });
   save();
+  reminders.scheduleSync();
+  progress.noteActivity();
   res.json(withCardInfo(card));
+});
+
+// Undoes the most recent review from the Review screen
+app.post("/api/reviews/undo", (_req, res) => {
+  const i = db.reviews.findLastIndex((r) => r.prev);
+  const review = db.reviews[i];
+  const card = review && db.cards.find((c) => c.id === review.cardId);
+  if (!card) return res.status(404).json({ error: "Nothing to undo." });
+  for (const f of SCHEDULE_FIELDS) {
+    if (review.prev[f] === null) delete card[f];
+    else card[f] = review.prev[f];
+  }
+  db.reviews.splice(i, 1);
+  save();
+  reminders.scheduleSync();
+  res.json(withCardInfo(card));
+});
+
+// Tab-separated file that Anki imports directly (File → Import)
+app.get("/api/export/anki.txt", (req, res) => {
+  const titles = Object.fromEntries(db.docs.map((d) => [d.id, d.title]));
+  const field = (s) => esc(s).replace(/\t/g, " ").replace(/\r?\n/g, "<br>");
+  const deckName = (id) => `ONSEI_LRN::${String(titles[id] || "Untitled").replace(/::/g, ":").replace(/[\t\r\n]/g, " ")}`;
+  const cards = db.cards.filter((c) => !req.query.docId || c.docId === req.query.docId);
+  const lines = ["#separator:tab", "#html:true", "#notetype:Basic", "#deck column:3", "#tags column:4"];
+  for (const c of cards) lines.push([field(c.front), field(c.back), deckName(c.docId), "onsei_lrn"].join("\t"));
+  res.attachment("onsei_lrn_cards.txt").type("text/plain; charset=utf-8").send(lines.join("\n") + "\n");
+});
+
+// --- Settings ---
+app.get("/api/settings", (_req, res) => res.json(getSettings()));
+
+app.put("/api/settings", async (req, res) => {
+  const before = getSettings();
+  let after;
+  try {
+    after = updateSettings(req.body);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  if (after.retention !== before.retention) {
+    db.cards.forEach((c) => (c.due = rescheduleDue(c, after.retention)));
+    save();
+  }
+  const r0 = before.reminders;
+  const r1 = after.reminders;
+  if (reminders.SUPPORTED && r0.enabled && (!r1.enabled || r1.list !== r0.list)) {
+    // Turned off or moved to another list: take the open reminders out of the old list
+    await reminders.syncNow({ clear: true, list: r0.list }).catch(() => {});
+  }
+  if (r1.enabled) reminders.scheduleSync(0);
+  res.json(after);
+});
+
+// --- Reminders and calendar feed ---
+app.get("/api/reminders", (_req, res) => res.json({ supported: reminders.SUPPORTED, ...reminders.status }));
+
+app.post("/api/reminders/sync", async (_req, res) => {
+  try {
+    await reminders.syncNow();
+    res.json({ supported: reminders.SUPPORTED, ...reminders.status });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.get("/calendar.ics", (_req, res) => {
+  res.type("text/calendar; charset=utf-8").send(reminders.calendarFeed());
+});
+
+// --- Progress log (git) ---
+app.get("/api/progress", (_req, res) => res.json({ repo: progress.repoDir(), ...progress.status }));
+
+app.post("/api/progress/run", async (_req, res) => {
+  try {
+    await progress.runNow();
+    res.json({ repo: progress.repoDir(), ...progress.status });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// --- Stats ---
+app.get("/api/stats", (req, res) => {
+  const days = Math.min(Math.max(Number(req.query.days) || 30, 7), 365);
+  res.json(computeStats(db, { days }));
 });
 
 // --- Activity log for the calendar ---
 app.get("/api/activity", (_req, res) => {
   res.json({
     attempts: db.attempts.map((a) => ({ at: a.createdAt, verdict: a.result.verdict, conceptId: a.conceptId })),
-    reviews: db.reviews.map((r) => ({ at: r.createdAt })),
+    reviews: db.reviews.filter((r) => r.source !== "explanation").map((r) => ({ at: r.createdAt })),
     cardsDue: db.cards.map((c) => ({ due: c.due })),
   });
 });
+
+const esc = (s) =>
+  String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
 function sendError(res, err) {
   if (err instanceof AIError) return res.status(502).json({ error: err.message });
@@ -219,6 +374,7 @@ const LABELS = { "claude-code": "Claude Code (your Claude Pro/Max login)", api: 
 
 const server = app.listen(PORT, HOST, () => {
   console.log(`ONSEI_LRN: http://localhost:${PORT}  AI: ${LABELS[PROVIDER]}`);
+  reminders.startBackgroundSync();
 });
 
 server.on("error", (err) => {

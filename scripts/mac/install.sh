@@ -3,6 +3,7 @@
 #  - runs ONSEI_LRN in the background, starting automatically when you log in
 #  - adds an "ONSEI_LRN" app (Spotlight / Launchpad / Dock) that opens it in Chrome
 set -euo pipefail
+# shellcheck source-path=SCRIPTDIR source=common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 require_macos
 cd "$APP_DIR"

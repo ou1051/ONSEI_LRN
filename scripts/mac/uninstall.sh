@@ -1,6 +1,7 @@
 #!/bin/bash
 # Removes the background service and the ONSEI_LRN app. Your decks and cards (data/) are kept.
 set -euo pipefail
+# shellcheck source-path=SCRIPTDIR source=common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 require_macos
 
