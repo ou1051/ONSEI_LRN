@@ -1,4 +1,4 @@
-/* Anki デスクトップ版（ライト/ダーク）の配色・余白・フォントに合わせる */
+/* Matches the colors, spacing and fonts of Anki desktop (light and dark) */
 :root {
   --canvas: #f5f5f5;
   --canvas-elevated: #ffffff;
@@ -53,9 +53,19 @@ a:hover { text-decoration: underline; }
 h1 { font-size: 1.3em; font-weight: 600; margin: 0 0 12px; }
 h2 { font-size: 1.1em; font-weight: 600; margin: 20px 0 8px; }
 .subtle { color: var(--fg-subtle); }
+.center { text-align: center; }
+kbd {
+  font: 0.85em ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--canvas-elevated);
+  color: var(--fg);
+}
 .small { font-size: 0.9em; }
 
-/* 上部ツールバー（Anki の Decks / Add / Browse / Stats 風） */
+/* Top toolbar, like Anki's Decks / Add / Browse / Stats */
 .toolbar {
   display: flex;
   justify-content: center;
@@ -70,7 +80,7 @@ h2 { font-size: 1.1em; font-weight: 600; margin: 20px 0 8px; }
 
 main { max-width: 860px; margin: 0 auto; padding: 16px; }
 
-/* ボタン */
+/* Buttons */
 button, .button {
   font: inherit;
   color: var(--fg);
@@ -91,7 +101,7 @@ button.primary { border-color: var(--accent); }
   margin-top: 16px;
 }
 
-/* デッキ一覧のような表 */
+/* Deck-list style tables */
 table.decks { width: 100%; border-collapse: collapse; }
 table.decks th { text-align: left; font-weight: normal; color: var(--fg-subtle); padding: 4px 8px; }
 table.decks th.num, table.decks td.num { text-align: right; width: 64px; }
@@ -111,9 +121,9 @@ table.decks tr:hover td { background: var(--highlight); }
 }
 .empty { text-align: center; color: var(--fg-subtle); padding: 32px 0; }
 
-/* 説明（音声）画面 */
+/* Explain-out-loud screen */
 .question { font-size: 20px; text-align: center; margin: 16px 0; font-family: arial, sans-serif; }
-textarea {
+textarea, input[type="text"], select {
   width: 100%;
   min-height: 140px;
   font: inherit;
@@ -124,6 +134,15 @@ textarea {
   padding: 8px;
   resize: vertical;
 }
+textarea.short { min-height: 48px; }
+select, input[type="text"] { min-height: 0; padding: 5px 8px; }
+.form label { display: block; margin: 12px 0 4px; }
+.form label:first-child { margin-top: 0; }
+.form label.check { display: flex; align-items: center; gap: 6px; }
+.form .subtle { margin-top: 4px; }
+.speak-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.hint { margin-top: 10px; line-height: 2; }
+table.shortcuts td:first-child { white-space: nowrap; width: 1%; }
 .interim { color: var(--fg-subtle); min-height: 1.5em; }
 .recording { border-color: var(--state-learn); color: var(--state-learn); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--state-learn); margin-right: 6px; animation: blink 1s infinite; }
@@ -138,7 +157,7 @@ textarea {
 ul.tight { margin: 4px 0; padding-left: 20px; }
 details summary { cursor: pointer; color: var(--fg-subtle); }
 
-/* フラッシュカード（Anki 既定テンプレート: arial 20px 中央寄せ） */
+/* Flashcards (Anki's default note type: arial 20px, centered) */
 .card {
   font-family: arial, sans-serif;
   font-size: 20px;
@@ -155,7 +174,7 @@ details summary { cursor: pointer; color: var(--fg-subtle); }
 .answer-buttons .btn-wrap { text-align: center; }
 .answer-buttons .ivl { font-size: 0.85em; color: var(--fg-subtle); }
 
-/* ボード */
+/* Board */
 .board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .column { background: var(--canvas-inset); border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 8px; min-height: 120px; }
 .column h2 { margin: 0 0 8px; font-size: 1em; }
@@ -164,7 +183,7 @@ details summary { cursor: pointer; color: var(--fg-subtle); }
 .progress { height: 6px; background: var(--border-subtle); border-radius: 3px; overflow: hidden; margin: 6px 0 16px; }
 .progress > div { height: 100%; background: var(--state-review); }
 
-/* カレンダー */
+/* Calendar */
 .cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .calendar { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
 .calendar .dow { text-align: center; color: var(--fg-subtle); font-size: 0.9em; }

@@ -1,9 +1,12 @@
-// ONSEI_LRN フロントエンド（ハッシュルーティングの小さなSPA）
+// ONSEI_LRN front end (a small single-page app with hash routing)
 const view = document.getElementById("view");
 
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const num = (n, cls) => `<td class="num ${n ? cls : "zero"}">${n}</td>`;
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+const MOD = isMac ? "⌘" : "Ctrl";
+const ALT = isMac ? "⌥" : "Alt";
 
 async function api(path, opts = {}) {
   const init = { ...opts };
@@ -14,7 +17,7 @@ async function api(path, opts = {}) {
   }
   const res = await fetch(path, init);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `エラー (${res.status})`);
+  if (!res.ok) throw new Error(data.error || `Error (${res.status})`);
   return data;
 }
 
@@ -24,7 +27,7 @@ function toast(msg, isError = false) {
   el.className = "toast" + (isError ? " error" : "");
   el.hidden = false;
   clearTimeout(toast.t);
-  toast.t = setTimeout(() => (el.hidden = true), isError ? 6000 : 3000);
+  toast.t = setTimeout(() => (el.hidden = true), isError ? 8000 : 3000);
 }
 
 const dayKey = (d) => {
@@ -32,15 +35,196 @@ const dayKey = (d) => {
   return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
 };
 
-// ---------------- 教材一覧 ----------------
+// ---------------- Settings (kept in this browser) ----------------
+const LANGS = {
+  en: { label: "English", speech: "en-US", endPhrases: "that's all, that is all" },
+  ja: { label: "日本語 (Japanese)", speech: "ja-JP", endPhrases: "以上, 以上です" },
+};
+const DEFAULT_SETTINGS = { lang: "en", autoSubmit: true, endPhrases: { en: LANGS.en.endPhrases, ja: LANGS.ja.endPhrases } };
+
+function loadSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("onsei-settings") || "{}");
+    return { ...DEFAULT_SETTINGS, ...saved, endPhrases: { ...DEFAULT_SETTINGS.endPhrases, ...saved.endPhrases } };
+  } catch {
+    return structuredClone(DEFAULT_SETTINGS);
+  }
+}
+let settings = loadSettings();
+
+function saveSettings() {
+  try {
+    localStorage.setItem("onsei-settings", JSON.stringify(settings));
+  } catch {
+    // Storage can be unavailable (e.g. private window); settings then last for this visit only
+  }
+}
+
+const phrasesFor = (lang) =>
+  settings.endPhrases[lang]
+    .split(/[,、]/)
+    .map((p) => p.trim().replace(/[’‘]/g, "'"))
+    .filter(Boolean);
+
+// Matches an end phrase at the very end of the transcript (ignoring trailing punctuation/space).
+// Latin phrases must start on a word boundary ("that's all", not "...xthat's all");
+// other phrases must not follow a digit (so "10以上" does not count as "以上").
+function endPhraseRegex(lang) {
+  const parts = phrasesFor(lang)
+    .sort((a, b) => b.length - a.length)
+    .map((p) => {
+      const body = p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+      return /^[a-z0-9]/i.test(p) ? `(?<![\\p{L}\\p{N}'])${body}` : `(?<!\\p{N})${body}`;
+    });
+  return parts.length ? new RegExp(`(?:${parts.join("|")})[\\s\\p{P}]*$`, "iu") : null;
+}
+
+// ---------------- Dictation (Web Speech API) ----------------
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const FATAL_ERRORS = {
+  "not-allowed": "Microphone access is blocked. Allow the microphone for this site in your browser settings.",
+  "service-not-allowed": "Speech recognition is not allowed in this browser.",
+  "audio-capture": "No microphone was found.",
+  network: "Speech recognition needs an internet connection.",
+  "language-not-supported": "This browser does not support speech recognition for the selected language.",
+};
+let activeDictation = null;
+
+function createDictation({ textarea, interimEl, onChange, onEndPhrase }) {
+  const lang = settings.lang;
+  const endRe = settings.autoSubmit ? endPhraseRegex(lang) : null;
+  let rec = null;
+  let wantOn = false;
+  let waiters = [];
+
+  const settle = () => {
+    waiters.forEach((w) => w());
+    waiters = [];
+  };
+
+  const appendFinal = (raw) => {
+    const t = raw.trim().replace(/[’‘]/g, "'");
+    if (!t) return;
+    const v = textarea.value;
+    let sep = "";
+    if (v && !/\s$/.test(v)) sep = lang === "ja" ? (/[。、！？!?]$/.test(v) ? "" : "。") : " ";
+    textarea.value = v + sep + t;
+  };
+
+  const spawn = () => {
+    const r = new SpeechRecognition();
+    r.lang = LANGS[lang].speech;
+    r.continuous = true;
+    r.interimResults = true;
+    r.onresult = (e) => {
+      if (r.ignored || !textarea.isConnected) return;
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) appendFinal(e.results[i][0].transcript);
+        else interim += e.results[i][0].transcript;
+      }
+      interimEl.textContent = interim;
+      if (wantOn && endRe) {
+        const m = endRe.exec(textarea.value);
+        if (m) {
+          textarea.value = textarea.value.slice(0, m.index).replace(/[\s、。,]+$/, "");
+          ctl.abort();
+          onEndPhrase();
+        }
+      }
+    };
+    r.onerror = (e) => {
+      if (FATAL_ERRORS[e.error]) {
+        wantOn = false;
+        toast(FATAL_ERRORS[e.error], true);
+      }
+    };
+    // Browsers end recognition after a silence; keep listening until the user stops
+    r.onend = () => {
+      if (rec !== r) return;
+      interimEl.textContent = "";
+      if (wantOn) {
+        try {
+          spawn();
+          return;
+        } catch {
+          wantOn = false;
+        }
+      }
+      rec = null;
+      onChange(false);
+      settle();
+    };
+    rec = r;
+    r.start();
+  };
+
+  const ctl = {
+    get listening() {
+      return wantOn;
+    },
+    start() {
+      if (!SpeechRecognition) return toast("This browser has no speech recognition. Use Chrome, or type your explanation.", true);
+      if (wantOn) return;
+      wantOn = true;
+      activeDictation = ctl;
+      // Still shutting down from a stop: its onend sees wantOn and resumes listening
+      if (rec) return onChange(true);
+      try {
+        spawn();
+      } catch (err) {
+        wantOn = false;
+        return toast(`Could not start the microphone: ${err.message}`, true);
+      }
+      onChange(true);
+    },
+    // Stops listening and resolves once the last words have been transcribed
+    stop() {
+      wantOn = false;
+      if (!rec) return Promise.resolve();
+      const r = rec;
+      return new Promise((resolve) => {
+        waiters.push(resolve);
+        setTimeout(() => {
+          if (rec === r) {
+            rec = null;
+            r.ignored = true;
+            interimEl.textContent = "";
+            onChange(false);
+            settle();
+          }
+        }, 2000);
+        r.stop();
+      });
+    },
+    // Stops immediately and drops anything still being transcribed
+    abort() {
+      wantOn = false;
+      if (rec) {
+        rec.ignored = true;
+        rec.abort();
+        rec = null;
+      }
+      interimEl.textContent = "";
+      onChange(false);
+      settle();
+    },
+    toggle() {
+      return wantOn ? ctl.stop() : ctl.start();
+    },
+  };
+  return ctl;
+}
+
+// ---------------- Decks ----------------
 async function renderDecks() {
   const docs = await api("/api/docs");
   view.innerHTML = `
-    <h1>教材</h1>
+    <h1>Decks</h1>
     ${
       docs.length
         ? `<table class="decks">
-            <tr><th>教材</th><th class="num">未着手</th><th class="num">学習中</th><th class="num">習得</th><th class="num">復習</th></tr>
+            <tr><th>Deck</th><th class="num">New</th><th class="num">Learning</th><th class="num">Mastered</th><th class="num">Due</th></tr>
             ${docs
               .map(
                 (d) => `<tr>
@@ -53,32 +237,34 @@ async function renderDecks() {
               )
               .join("")}
           </table>`
-        : `<div class="empty">まだ教材がありません。PDFを追加してください。</div>`
+        : `<div class="empty">No decks yet. Add a PDF to get started.</div>`
     }
     <div class="bottom-bar">
-      <label class="button">PDFを追加<input type="file" accept="application/pdf" id="pdf" hidden></label>
+      <label class="button">Add PDF<input type="file" accept="application/pdf" id="pdf" hidden></label>
     </div>
-    <p id="upload-status" class="subtle small" style="text-align:center"></p>`;
+    <p id="upload-status" class="subtle small center"></p>`;
 
   document.getElementById("pdf").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     const status = document.getElementById("upload-status");
-    status.textContent = `「${file.name}」を読み込み、概念を抽出しています…（数十秒かかることがあります）`;
+    status.textContent = `Reading "${file.name}" and extracting concepts… this can take a minute or two.`;
     const form = new FormData();
+    form.append("lang", settings.lang);
     form.append("pdf", file);
     try {
       const doc = await api("/api/docs", { method: "POST", body: form });
       location.hash = `#/doc/${doc.id}`;
     } catch (err) {
       status.textContent = "";
+      e.target.value = "";
       toast(err.message, true);
     }
   });
 }
 
-// ---------------- 教材詳細（概念リスト） ----------------
-const STATUS = { new: ["未着手", "new"], learning: ["学習中", "learn"], mastered: ["習得", "review"] };
+// ---------------- Deck detail (concept list) ----------------
+const STATUS = { new: ["New", "new"], learning: ["Learning", "learn"], mastered: ["Mastered", "review"] };
 
 async function renderDoc(id) {
   const doc = await api(`/api/docs/${id}`);
@@ -86,10 +272,10 @@ async function renderDoc(id) {
   const next = doc.concepts.find((c) => c.status !== "mastered");
   view.innerHTML = `
     <h1>${esc(doc.title)}</h1>
-    <div class="subtle small">${esc(doc.filename)} ・ ${mastered} / ${doc.concepts.length} 習得</div>
+    <div class="subtle small">${esc(doc.filename)} · ${mastered} / ${doc.concepts.length} mastered</div>
     <div class="progress"><div style="width:${doc.concepts.length ? (mastered / doc.concepts.length) * 100 : 0}%"></div></div>
     <table class="decks">
-      <tr><th>概念</th><th>ページ</th><th class="num">試行</th><th class="num">状態</th></tr>
+      <tr><th>Concept</th><th>Pages</th><th class="num">Attempts</th><th class="num">Status</th></tr>
       ${doc.concepts
         .map(
           (c) => `<tr>
@@ -102,129 +288,120 @@ async function renderDoc(id) {
         .join("")}
     </table>
     <div class="bottom-bar">
-      ${next ? `<a class="button primary" href="#/practice/${next.id}">次の概念を説明する</a>` : ""}
-      <a class="button" href="#/review?doc=${doc.id}">この教材のカードを復習</a>
-      <a class="button" href="/api/docs/${doc.id}/pdf" target="_blank">PDFを開く</a>
-      <button id="del">削除</button>
+      ${next ? `<a class="button primary" href="#/practice/${next.id}">Explain next concept</a>` : ""}
+      <a class="button" href="#/review?doc=${doc.id}">Review this deck</a>
+      <a class="button" href="/api/docs/${doc.id}/pdf" target="_blank">Open PDF</a>
+      <button id="del">Delete</button>
     </div>`;
   document.getElementById("del").onclick = async () => {
-    if (!confirm(`「${doc.title}」と関連するカード・履歴をすべて削除しますか？`)) return;
+    if (!confirm(`Delete "${doc.title}" with all of its cards and history?`)) return;
     await api(`/api/docs/${doc.id}`, { method: "DELETE" });
     location.hash = "#/";
   };
 }
 
-// ---------------- 音声で説明 → AIフィードバック ----------------
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let activeRecognizer = null;
-
-function stopRecognizer() {
-  if (activeRecognizer) {
-    activeRecognizer.keep = false;
-    activeRecognizer.stop();
-    activeRecognizer = null;
-  }
-}
-
+// ---------------- Explain out loud → AI feedback ----------------
 async function renderPractice(id) {
   const c = await api(`/api/concepts/${id}`);
   const doc = await api(`/api/docs/${c.docId}`);
   const idx = doc.concepts.findIndex((x) => x.id === c.id);
-  const nextConcept = doc.concepts.slice(idx + 1).find((x) => x.status !== "mastered") || doc.concepts.find((x) => x.status !== "mastered" && x.id !== c.id);
+  const nextConcept =
+    doc.concepts.slice(idx + 1).find((x) => x.status !== "mastered") ||
+    doc.concepts.find((x) => x.status !== "mastered" && x.id !== c.id);
 
-  // 直近の「正解」以降の試行 = 現在のサイクル
+  // Attempts since the last correct one = the current cycle
   const lastOk = c.attemptsList.findLastIndex((a) => a.result.verdict === "correct");
   let cycle = c.attemptsList.slice(lastOk + 1);
+  const phrases = phrasesFor(settings.lang);
+  const endHint =
+    settings.autoSubmit && phrases.length
+      ? `Finish by saying <b>“${esc(phrases[0])}”</b> to submit`
+      : `Press <kbd>${MOD}</kbd>+<kbd>Enter</kbd> to submit`;
 
   view.innerHTML = `
-    <div class="subtle small"><a href="#/doc/${doc.id}">${esc(doc.title)}</a> ・ ${idx + 1} / ${doc.concepts.length}</div>
+    <div class="subtle small"><a href="#/doc/${doc.id}">${esc(doc.title)}</a> · ${idx + 1} / ${doc.concepts.length}</div>
     <div class="question">${esc(c.question)}</div>
-    <div class="subtle small" style="text-align:center">PDFを見ずに、自分の言葉で声に出して説明してください。</div>
+    <div class="subtle small center">Without looking at the PDF, explain it out loud in your own words.</div>
     <div id="history"></div>
     <div class="panel" id="speak">
-      <div id="round" class="subtle small"></div>
-      <textarea id="transcript" placeholder="録音ボタンを押して説明を始めてください（ここに文字起こしが入ります。手で直すこともできます）"></textarea>
+      <div class="speak-head">
+        <span id="round" class="subtle small"></span>
+        <span class="subtle small">${esc(LANGS[settings.lang].label)} · <a href="#/settings">Settings</a></span>
+      </div>
+      <textarea id="transcript" placeholder="Press Space to start talking. Your words appear here, and you can edit them before submitting."></textarea>
       <div id="interim" class="interim"></div>
       <div class="bottom-bar">
         <button id="rec"></button>
-        <button id="send" class="primary">説明を終えて判定する</button>
+        <button id="send" class="primary">Done – check my explanation</button>
       </div>
-      ${SpeechRecognition ? "" : `<p class="learn small">このブラウザは音声認識に対応していません。Chrome / Edge / Safari で開くか、テキストで入力してください。</p>`}
+      <div class="hint subtle small center">
+        <kbd>Space</kbd> start / stop · ${endHint} · <kbd>Esc</kbd> stop without submitting
+      </div>
+      ${SpeechRecognition ? "" : `<p class="learn small center">This browser has no speech recognition. Open the app in Chrome, or type your explanation.</p>`}
     </div>
     <div id="result"></div>
-    <details><summary>要点を見る（ネタバレ）</summary><ul class="tight">${c.key_points.map((k) => `<li>${esc(k)}</li>`).join("")}</ul>
-      <a href="/api/docs/${doc.id}/pdf${c.pages ? `#page=${parseInt(c.pages)}` : ""}" target="_blank">PDFの該当ページを開く</a></details>`;
+    <details><summary>Show key points (spoiler)</summary><ul class="tight">${c.key_points.map((k) => `<li>${esc(k)}</li>`).join("")}</ul>
+      <a href="/api/docs/${doc.id}/pdf${c.pages ? `#page=${parseInt(c.pages, 10) || 1}` : ""}" target="_blank">Open the PDF at this page</a></details>`;
 
   const ta = document.getElementById("transcript");
-  const interim = document.getElementById("interim");
   const recBtn = document.getElementById("rec");
   const sendBtn = document.getElementById("send");
+  let busy = false;
+  let done = false;
 
   const drawHistory = () => {
-    document.getElementById("round").textContent = `${cycle.length + 1}回目の説明`;
+    document.getElementById("round").textContent = `Attempt ${cycle.length + 1}`;
     document.getElementById("history").innerHTML = cycle.length
-      ? `<h2>これまでの説明</h2>` + cycle.map((a, i) => feedbackHTML(a, i + 1, true)).join("")
+      ? `<h2>Previous attempts</h2>` + cycle.map((a, i) => feedbackHTML(a, i + 1, true)).join("")
       : "";
   };
   drawHistory();
 
   const setRec = (on) => {
-    recBtn.innerHTML = on ? `<span class="dot"></span>録音を止める` : "● 録音して説明する";
+    recBtn.innerHTML = on ? `<span class="dot"></span>Stop recording` : "● Start recording";
     recBtn.classList.toggle("recording", on);
   };
   setRec(false);
 
-  recBtn.onclick = () => {
-    if (activeRecognizer) return stopRecognizer(), setRec(false);
-    if (!SpeechRecognition) return toast("音声認識に対応していないブラウザです", true);
-    const r = new SpeechRecognition();
-    r.lang = "ja-JP";
-    r.continuous = true;
-    r.interimResults = true;
-    r.keep = true;
-    r.onresult = (e) => {
-      let tmp = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) ta.value += (ta.value && !/[\s。、]$/.test(ta.value) ? "。" : "") + t;
-        else tmp += t;
-      }
-      interim.textContent = tmp;
-    };
-    r.onerror = (e) => {
-      if (e.error === "not-allowed") toast("マイクの使用が許可されていません", true);
-      if (e.error === "not-allowed" || e.error === "service-not-allowed") r.keep = false;
-    };
-    // 無音で自動停止したら録音中は再開する
-    r.onend = () => {
-      interim.textContent = "";
-      if (r.keep) r.start();
-      else setRec(false);
-    };
-    activeRecognizer = r;
-    r.start();
-    setRec(true);
-  };
+  const dictation = createDictation({
+    textarea: ta,
+    interimEl: document.getElementById("interim"),
+    onChange: setRec,
+    onEndPhrase: () => submit(),
+  });
 
-  sendBtn.onclick = async () => {
-    stopRecognizer();
-    setRec(false);
+  async function submit() {
+    if (busy || done) return;
+    await dictation.stop();
+    // Also drop an end phrase left at the end when recording was stopped by hand
+    const endRe = settings.autoSubmit ? endPhraseRegex(settings.lang) : null;
+    const m = endRe?.exec(ta.value);
+    if (m) ta.value = ta.value.slice(0, m.index).replace(/[\s、。,]+$/, "");
     const transcript = ta.value.trim();
-    if (!transcript) return toast("説明が空です", true);
+    if (!transcript) return toast("Your explanation is empty.", true);
+    busy = true;
     sendBtn.disabled = recBtn.disabled = true;
-    sendBtn.textContent = "AIが判定中…";
+    sendBtn.textContent = "Checking your explanation…";
+    document.activeElement?.blur();
     try {
-      const { attempt, card } = await api(`/api/concepts/${c.id}/attempts`, { json: { transcript } });
+      const { attempt, card } = await api(`/api/concepts/${c.id}/attempts`, { json: { transcript, lang: settings.lang } });
+      if (!view.contains(ta)) return; // the user navigated away while waiting
       const res = document.getElementById("result");
       if (attempt.result.verdict === "correct") {
+        done = true;
+        document.getElementById("toast").hidden = true;
         document.getElementById("speak").hidden = true;
         res.innerHTML =
           feedbackHTML(attempt, cycle.length + 1) +
-          `<h2>フラッシュカードを作成しました</h2>
+          `<h2>Flashcard created</h2>
           <div class="card">${esc(card.front)}<hr>${esc(card.back)}</div>
           <div class="bottom-bar">
-            ${nextConcept ? `<a class="button primary" href="#/practice/${nextConcept.id}">次の概念へ</a>` : `<a class="button primary" href="#/doc/${doc.id}">教材に戻る</a>`}
-            <a class="button" href="#/cards?edit=${card.id}">カードを編集</a>
+            ${
+              nextConcept
+                ? `<a class="button primary" id="next" href="#/practice/${nextConcept.id}">Next concept <kbd>Enter</kbd></a>`
+                : `<a class="button primary" id="next" href="#/doc/${doc.id}">Back to deck <kbd>Enter</kbd></a>`
+            }
+            <a class="button" href="#/cards?edit=${card.id}">Edit card</a>
           </div>`;
       } else {
         cycle = [...cycle, attempt];
@@ -232,13 +409,50 @@ async function renderPractice(id) {
         res.innerHTML = "";
         ta.value = "";
         document.getElementById("history").lastElementChild.scrollIntoView({ behavior: "smooth", block: "start" });
-        toast("フィードバックを読んで、もう一度説明してみましょう");
+        toast("Read the feedback, then press Space and explain it again.");
       }
     } catch (err) {
       toast(err.message, true);
     } finally {
+      busy = false;
       sendBtn.disabled = recBtn.disabled = false;
-      sendBtn.textContent = "説明を終えて判定する";
+      sendBtn.textContent = "Done – check my explanation";
+    }
+  }
+
+  recBtn.onclick = () => {
+    recBtn.blur(); // so a later Space press is not also treated as a button click
+    if (!busy) dictation.toggle();
+  };
+  sendBtn.onclick = () => submit();
+
+  keyHandler = (e) => {
+    if (e.repeat) return;
+    const typing = e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT";
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      return submit();
+    }
+    if (done) {
+      if (e.key === "Enter" && !typing) {
+        e.preventDefault();
+        document.getElementById("next")?.click();
+      }
+      return;
+    }
+    if (busy) return;
+    if (e.altKey && e.code === "KeyR") {
+      e.preventDefault();
+      return dictation.toggle();
+    }
+    if (e.key === "Escape" && dictation.listening) {
+      e.preventDefault();
+      return dictation.stop();
+    }
+    if (e.code === "Space" && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      if (e.target.tagName === "BUTTON") e.target.blur();
+      dictation.toggle();
     }
   };
 }
@@ -247,45 +461,40 @@ function feedbackHTML(a, n, collapsedTranscript = false) {
   const r = a.result;
   const ok = r.verdict === "correct";
   return `<div class="panel">
-    <div class="verdict ${ok ? "correct" : "incorrect"}">${n}回目: ${ok ? "正しく説明できました" : "修正が必要です"}</div>
-    <details ${collapsedTranscript ? "" : "open"}><summary>あなたの説明</summary><p>${esc(a.transcript)}</p></details>
+    <div class="verdict ${ok ? "correct" : "incorrect"}">Attempt ${n}: ${ok ? "Correct" : "Needs work"}</div>
+    <details ${collapsedTranscript ? "" : "open"}><summary>What you said</summary><p>${esc(a.transcript)}</p></details>
     <p>${esc(r.overall)}</p>
     ${r.mistakes
       .map(
         (m) => `<div class="mistake">
-          <div class="quote">「${esc(m.quote)}」</div>
-          <div><span class="label">なぜ違うか: </span>${esc(m.problem)}</div>
-          <div><span class="label">正しくは: </span>${esc(m.correction)}</div>
+          <div class="quote">“${esc(m.quote)}”</div>
+          <div><span class="label">Why it's wrong: </span>${esc(m.problem)}</div>
+          <div><span class="label">Correct idea: </span>${esc(m.correction)}</div>
         </div>`,
       )
       .join("")}
-    ${r.missing.length ? `<div class="label subtle small">抜けている要点</div><ul class="tight">${r.missing.map((m) => `<li>${esc(m)}</li>`).join("")}</ul>` : ""}
+    ${r.missing.length ? `<div class="label subtle small">Missing key points</div><ul class="tight">${r.missing.map((m) => `<li>${esc(m)}</li>`).join("")}</ul>` : ""}
   </div>`;
 }
 
-// ---------------- ボード ----------------
+// ---------------- Board ----------------
 async function renderBoard() {
   const concepts = await api("/api/concepts");
-  const cols = [
-    ["new", "未着手"],
-    ["learning", "学習中"],
-    ["mastered", "習得"],
-  ];
   const mastered = concepts.filter((c) => c.status === "mastered").length;
   view.innerHTML = `
-    <h1>進捗ボード</h1>
-    <div class="subtle small">${mastered} / ${concepts.length} 概念を習得</div>
+    <h1>Progress board</h1>
+    <div class="subtle small">${mastered} / ${concepts.length} concepts mastered</div>
     <div class="progress"><div style="width:${concepts.length ? (mastered / concepts.length) * 100 : 0}%"></div></div>
     <div class="board">
-      ${cols
-        .map(([key, label]) => {
+      ${Object.entries(STATUS)
+        .map(([key, [label, cls]]) => {
           const list = concepts.filter((c) => c.status === key);
           return `<div class="column">
-            <h2 class="${STATUS[key][1]}">${label} <span class="subtle">${list.length}</span></h2>
+            <h2 class="${cls}">${label} <span class="subtle">${list.length}</span></h2>
             ${list
               .map(
                 (c) => `<a class="tile" href="#/practice/${c.id}">${esc(c.title)}
-                  <div class="subtle small">${esc(c.docTitle)}${c.attempts ? ` ・ ${c.attempts}回` : ""}</div></a>`,
+                  <div class="subtle small">${esc(c.docTitle)}${c.attempts ? ` · ${c.attempts} attempt${c.attempts === 1 ? "" : "s"}` : ""}</div></a>`,
               )
               .join("")}
           </div>`;
@@ -294,7 +503,7 @@ async function renderBoard() {
     </div>`;
 }
 
-// ---------------- カレンダー ----------------
+// ---------------- Calendar ----------------
 let calMonth = new Date();
 calMonth.setDate(1);
 
@@ -313,7 +522,7 @@ async function renderCalendar() {
     bump(k < todayKey ? todayKey : k, "due");
   });
 
-  // 連続学習日数
+  // Study streak (today counts once you study; an empty today does not break it)
   let streak = 0;
   for (let d = new Date(); ; d.setDate(d.getDate() - 1)) {
     const s = stats[dayKey(d)];
@@ -333,84 +542,102 @@ async function renderCalendar() {
     const heat = total === 0 ? "" : total < 4 ? "heat-1" : total < 10 ? "heat-2" : "heat-3";
     cells.push(`<div class="day ${heat} ${d.getMonth() !== m ? "other" : ""} ${k === todayKey ? "today" : ""}">
       <div class="n">${d.getDate()}</div>
-      ${s.att ? `<div>説明 ${s.att}</div>` : ""}
-      ${s.ok ? `<div class="review">習得 ${s.ok}</div>` : ""}
-      ${s.rev ? `<div>復習 ${s.rev}</div>` : ""}
-      ${s.due && k >= todayKey ? `<div class="new">予定 ${s.due}</div>` : ""}
+      ${s.att ? `<div>Explained ${s.att}</div>` : ""}
+      ${s.ok ? `<div class="review">Mastered ${s.ok}</div>` : ""}
+      ${s.rev ? `<div>Reviewed ${s.rev}</div>` : ""}
+      ${s.due && k >= todayKey ? `<div class="new">Due ${s.due}</div>` : ""}
     </div>`);
   }
 
   view.innerHTML = `
-    <h1>カレンダー</h1>
-    <div class="subtle small">連続学習 ${streak} 日</div>
+    <h1>Calendar</h1>
+    <div class="subtle small">Study streak: ${streak} day${streak === 1 ? "" : "s"}</div>
     <div class="cal-head">
-      <button id="prev">‹</button><strong>${y}年 ${m + 1}月</strong><button id="next">›</button>
+      <button id="prev" aria-label="Previous month">‹</button>
+      <strong>${calMonth.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</strong>
+      <button id="next" aria-label="Next month">›</button>
     </div>
     <div class="calendar">
-      ${["日", "月", "火", "水", "木", "金", "土"].map((d) => `<div class="dow">${d}</div>`).join("")}
+      ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => `<div class="dow">${d}</div>`).join("")}
       ${cells.join("")}
     </div>
     <div class="legend subtle small">
-      <span>説明 = 音声で説明した回数</span><span class="review">習得 = 正しく説明できた概念</span>
-      <span>復習 = カード復習数</span><span class="new">予定 = 復習予定のカード</span>
+      <span>Explained = explanations given</span><span class="review">Mastered = concepts explained correctly</span>
+      <span>Reviewed = cards reviewed</span><span class="new">Due = cards scheduled for review</span>
     </div>`;
   document.getElementById("prev").onclick = () => (calMonth.setMonth(m - 1), renderCalendar());
   document.getElementById("next").onclick = () => (calMonth.setMonth(m + 1), renderCalendar());
 }
 
-// ---------------- 復習（Anki の学習画面） ----------------
-const RATING_LABEL = { again: "もう一度", hard: "難しい", good: "正解", easy: "簡単" };
+// ---------------- Review (Anki's study screen) ----------------
+const RATING_LABEL = { again: "Again", hard: "Hard", good: "Good", easy: "Easy" };
 
 async function renderReview(params) {
   const docId = params.get("doc");
-  const cards = await api(`/api/cards?due=1${docId ? `&docId=${docId}` : ""}`);
+  const cards = await api(`/api/cards?due=1${docId ? `&docId=${encodeURIComponent(docId)}` : ""}`);
   if (!cards.length) {
-    view.innerHTML = `<div class="empty">おめでとうございます！ 今日の復習は終わりました。</div>
-      <div class="bottom-bar"><a class="button" href="#/">教材に戻る</a></div>`;
+    view.innerHTML = `<div class="empty">Congratulations! You have finished your reviews for now.</div>
+      <div class="bottom-bar"><a class="button" href="#/">Back to decks</a></div>`;
     return;
   }
   const card = cards[0];
+  let shown = false;
   view.innerHTML = `
-    <div class="subtle small" style="text-align:center">残り <span class="review">${cards.length}</span></div>
+    <div class="subtle small center">Remaining <span class="review">${cards.length}</span></div>
     <div class="card" id="card">${esc(card.front)}</div>
-    <div class="bottom-bar" id="actions"><button id="show" class="primary">答えを表示</button></div>`;
+    <div class="bottom-bar" id="actions"><button id="show" class="primary">Show Answer</button></div>`;
   const show = () => {
+    shown = true;
     document.getElementById("card").innerHTML = `${esc(card.front)}<hr>${esc(card.back)}`;
     document.getElementById("actions").outerHTML = `<div class="answer-buttons">
       ${Object.entries(RATING_LABEL)
-        .map(([k, label], i) => `<div class="btn-wrap"><div class="ivl">${card.intervals[k]}</div><button data-r="${k}" title="${i + 1}">${label}</button></div>`)
+        .map(([k, label], i) => `<div class="btn-wrap"><div class="ivl">${card.intervals[k]}</div><button data-r="${k}" title="Shortcut: ${i + 1}">${label}</button></div>`)
         .join("")}
     </div>`;
     view.querySelectorAll("[data-r]").forEach((b) => (b.onclick = () => rate(b.dataset.r)));
   };
-  const rate = async (rating) => {
-    await api(`/api/cards/${card.id}/review`, { json: { rating } });
-    renderReview(params);
+  let rating = false;
+  const rate = async (r) => {
+    if (rating) return;
+    rating = true;
+    try {
+      await api(`/api/cards/${card.id}/review`, { json: { rating: r } });
+      renderReview(params);
+    } catch (err) {
+      rating = false;
+      toast(err.message, true);
+    }
   };
   document.getElementById("show").onclick = show;
   keyHandler = (e) => {
-    if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
-    if (e.code === "Space" && document.getElementById("show")) (e.preventDefault(), show());
-    const r = { Digit1: "again", Digit2: "hard", Digit3: "good", Digit4: "easy" }[e.code];
-    if (r && !document.getElementById("show")) rate(r);
+    if (e.repeat || e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
+    if (!shown && (e.code === "Space" || e.key === "Enter")) {
+      e.preventDefault();
+      return show();
+    }
+    const r = { Digit1: "again", Digit2: "hard", Digit3: "good", Digit4: "easy", Space: "good", Enter: "good" }[e.code];
+    if (shown && r) {
+      e.preventDefault();
+      rate(r);
+    }
   };
 }
 
-// ---------------- カード一覧（ブラウザ） ----------------
+// ---------------- Card browser ----------------
 async function renderCards(params) {
   const [cards, docs] = await Promise.all([api("/api/cards"), api("/api/docs")]);
   const titles = Object.fromEntries(docs.map((d) => [d.id, d.title]));
   const editId = params.get("edit");
   view.innerHTML = `
-    <h1>カード <span class="subtle">${cards.length}</span></h1>
-    ${cards.length ? "" : `<div class="empty">正しく説明できた概念がここにカードとして貯まります。</div>`}
+    <h1>Cards <span class="subtle">${cards.length}</span></h1>
+    ${cards.length ? "" : `<div class="empty">Concepts you explain correctly are saved here as flashcards.</div>`}
     ${cards
       .map(
         (c) => `<div class="panel" data-id="${c.id}">
-          <div class="subtle small">${esc(titles[c.docId])} ・ 次回 ${new Date(c.due).toLocaleDateString("ja-JP")}</div>
-          <label class="subtle small">表</label><textarea class="front" style="min-height:48px">${esc(c.front)}</textarea>
-          <label class="subtle small">裏（あなたの説明）</label><textarea class="back">${esc(c.back)}</textarea>
-          <div class="bottom-bar"><button class="save">保存</button><button class="delete">削除</button></div>
+          <div class="subtle small">${esc(titles[c.docId])} · next review ${new Date(c.due).toLocaleDateString("en-US")}</div>
+          <label class="subtle small">Front</label><textarea class="front short">${esc(c.front)}</textarea>
+          <label class="subtle small">Back (your words)</label><textarea class="back">${esc(c.back)}</textarea>
+          <div class="bottom-bar"><button class="save">Save</button><button class="delete">Delete</button></div>
         </div>`,
       )
       .join("")}`;
@@ -418,23 +645,81 @@ async function renderCards(params) {
     const id = p.dataset.id;
     p.querySelector(".save").onclick = async () => {
       await api(`/api/cards/${id}`, { method: "PUT", json: { front: p.querySelector(".front").value, back: p.querySelector(".back").value } });
-      toast("保存しました");
+      toast("Saved.");
     };
     p.querySelector(".delete").onclick = async () => {
-      if (!confirm("このカードを削除しますか？")) return;
+      if (!confirm("Delete this card?")) return;
       await api(`/api/cards/${id}`, { method: "DELETE" });
       p.remove();
     };
   });
-  if (editId) view.querySelector(`[data-id="${editId}"]`)?.scrollIntoView({ block: "center" });
+  if (editId) view.querySelector(`[data-id="${CSS.escape(editId)}"]`)?.scrollIntoView({ block: "center" });
 }
 
-// ---------------- ルーター ----------------
+// ---------------- Settings ----------------
+async function renderSettings() {
+  const health = await api("/api/health").catch(() => ({}));
+  const AI_LABELS = { "claude-code": "Claude Code (your Claude Pro/Max login, no extra cost)", api: "Claude API (pay-as-you-go)", mock: "Mock (no AI)" };
+  view.innerHTML = `
+    <h1>Settings</h1>
+    <div class="panel form">
+      <label for="lang">Language you explain in</label>
+      <select id="lang">${Object.entries(LANGS).map(([k, l]) => `<option value="${k}" ${k === settings.lang ? "selected" : ""}>${esc(l.label)}</option>`).join("")}</select>
+      <div class="subtle small">Used for speech recognition, AI feedback, and concepts extracted from new PDFs.</div>
+
+      <label class="check"><input type="checkbox" id="auto" ${settings.autoSubmit ? "checked" : ""}> Submit automatically when I say an end phrase</label>
+
+      <label for="phrases">End phrases for <span id="lang-name"></span></label>
+      <input type="text" id="phrases">
+      <div class="subtle small">Separate with commas. Say one of these as the last thing in your explanation; it is removed and everything before it is submitted.</div>
+    </div>
+
+    <h2>Keyboard shortcuts</h2>
+    <table class="decks shortcuts">
+      <tr><td><kbd>Space</kbd></td><td>Start / stop recording (when not typing in the text box)</td></tr>
+      <tr><td><kbd>${ALT}</kbd>+<kbd>R</kbd></td><td>Start / stop recording, even while typing</td></tr>
+      <tr><td><kbd>${MOD}</kbd>+<kbd>Enter</kbd></td><td>Submit your explanation</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>Stop recording without submitting</td></tr>
+      <tr><td><kbd>Enter</kbd></td><td>After a correct explanation: go to the next concept</td></tr>
+      <tr><td><kbd>Space</kbd> / <kbd>1</kbd>–<kbd>4</kbd></td><td>Review: show answer / Again, Hard, Good, Easy</td></tr>
+    </table>
+
+    <h2>AI</h2>
+    <p class="subtle">${esc(AI_LABELS[health.provider] || "Unknown")}</p>`;
+
+  const lang = document.getElementById("lang");
+  const phrases = document.getElementById("phrases");
+  const fill = () => {
+    document.getElementById("lang-name").textContent = LANGS[settings.lang].label;
+    phrases.value = settings.endPhrases[settings.lang];
+  };
+  fill();
+  lang.onchange = () => {
+    settings.lang = lang.value;
+    saveSettings();
+    fill();
+    toast("Saved.");
+  };
+  document.getElementById("auto").onchange = (e) => {
+    settings.autoSubmit = e.target.checked;
+    saveSettings();
+    toast("Saved.");
+  };
+  phrases.onchange = () => {
+    settings.endPhrases[settings.lang] = phrases.value.trim() || LANGS[settings.lang].endPhrases;
+    saveSettings();
+    fill();
+    toast("Saved.");
+  };
+}
+
+// ---------------- Router ----------------
 let keyHandler = null;
 document.addEventListener("keydown", (e) => keyHandler?.(e));
 
 async function route() {
-  stopRecognizer();
+  activeDictation?.abort();
+  activeDictation = null;
   keyHandler = null;
   document.getElementById("toast").hidden = true;
   const [path, query] = location.hash.slice(1).split("?");
@@ -448,6 +733,7 @@ async function route() {
     else if (page === "calendar") await renderCalendar();
     else if (page === "review") await renderReview(params);
     else if (page === "cards") await renderCards(params);
+    else if (page === "settings") await renderSettings();
     else await renderDecks();
   } catch (err) {
     view.innerHTML = `<div class="empty">${esc(err.message)}</div>`;

@@ -1,13 +1,18 @@
 {
   "name": "onsei-lrn",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "PDFの内容を音声で説明し、AIの添削を受けながら概念を身につける学習アプリ",
+  "description": "Learn a PDF by explaining it out loud: AI feedback until you get it right, then flashcards in your own words",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "setup": "bash scripts/mac/install.sh",
+    "uninstall": "bash scripts/mac/uninstall.sh",
+    "update": "bash scripts/mac/update.sh",
+    "restart": "bash scripts/mac/restart.sh",
+    "logs": "tail -n 50 -f \"$HOME/Library/Logs/ONSEI_LRN/server.log\""
   },
   "engines": {
     "node": ">=20"

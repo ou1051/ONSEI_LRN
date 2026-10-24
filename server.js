@@ -2,13 +2,18 @@ import express from "express";
 import multer from "multer";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { db, save, newId, now, PDF_DIR } from "./lib/db.js";
-import { extractConcepts, evaluateExplanation, AIError, PROVIDER } from "./lib/ai.js";
+import { extractConcepts, evaluateExplanation, AIError, PROVIDER, LANGUAGES } from "./lib/ai.js";
 import { newCardState, schedule, describeDelay, RATINGS } from "./lib/srs.js";
+
+const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || "127.0.0.1";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static("public"));
+app.use(express.static(path.join(APP_DIR, "public")));
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -17,10 +22,11 @@ const upload = multer({
 });
 
 const pdfPath = (doc) => path.join(PDF_DIR, `${doc.id}.pdf`);
+const pickLang = (lang) => (lang in LANGUAGES ? lang : "en");
 
 const find = (list, id, res, label) => {
   const item = list.find((x) => x.id === id);
-  if (!item) res.status(404).json({ error: `${label}が見つかりません` });
+  if (!item) res.status(404).json({ error: `${label} not found` });
   return item;
 };
 
@@ -29,7 +35,9 @@ const withCardInfo = (card) => ({
   intervals: Object.fromEntries(RATINGS.map((r) => [r, describeDelay(card, r)])),
 });
 
-// --- 教材 (PDF) ---
+app.get("/api/health", (_req, res) => res.json({ ok: true, app: "onsei-lrn", provider: PROVIDER }));
+
+// --- Decks (PDFs) ---
 app.get("/api/docs", (_req, res) => {
   res.json(
     db.docs.map((d) => {
@@ -46,11 +54,12 @@ app.get("/api/docs", (_req, res) => {
 });
 
 app.post("/api/docs", upload.single("pdf"), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "PDFファイルを選んでください" });
+  if (!req.file) return res.status(400).json({ error: "Please choose a PDF file." });
   const doc = { id: newId(), filename: req.file.originalname, title: "", createdAt: now() };
   fs.writeFileSync(pdfPath(doc), req.file.buffer);
   try {
-    const result = await extractConcepts(pdfPath(doc));
+    const result = await extractConcepts(pdfPath(doc), pickLang(req.body?.lang));
+    if (!result.concepts?.length) throw new AIError("No concepts could be found in this PDF.");
     doc.title = result.doc_title || doc.filename;
     db.docs.push(doc);
     result.concepts.forEach((c, i) =>
@@ -65,19 +74,19 @@ app.post("/api/docs", upload.single("pdf"), async (req, res) => {
 });
 
 app.get("/api/docs/:id", (req, res) => {
-  const doc = find(db.docs, req.params.id, res, "教材");
+  const doc = find(db.docs, req.params.id, res, "Deck");
   if (!doc) return;
   const concepts = db.concepts.filter((c) => c.docId === doc.id).sort((a, b) => a.order - b.order);
   res.json({ ...doc, concepts });
 });
 
 app.get("/api/docs/:id/pdf", (req, res) => {
-  const doc = find(db.docs, req.params.id, res, "教材");
+  const doc = find(db.docs, req.params.id, res, "Deck");
   if (doc) res.sendFile(pdfPath(doc));
 });
 
 app.delete("/api/docs/:id", (req, res) => {
-  const doc = find(db.docs, req.params.id, res, "教材");
+  const doc = find(db.docs, req.params.id, res, "Deck");
   if (!doc) return;
   const keep = (x) => x.docId !== doc.id;
   db.docs = db.docs.filter((d) => d.id !== doc.id);
@@ -90,14 +99,14 @@ app.delete("/api/docs/:id", (req, res) => {
   res.json({ ok: true });
 });
 
-// --- 概念と説明の試行 ---
+// --- Concepts and explanation attempts ---
 app.get("/api/concepts", (_req, res) => {
   const titles = Object.fromEntries(db.docs.map((d) => [d.id, d.title]));
   res.json(db.concepts.map((c) => ({ ...c, docTitle: titles[c.docId] })));
 });
 
 app.get("/api/concepts/:id", (req, res) => {
-  const concept = find(db.concepts, req.params.id, res, "概念");
+  const concept = find(db.concepts, req.params.id, res, "Concept");
   if (!concept) return;
   const doc = db.docs.find((d) => d.id === concept.docId);
   const attempts = db.attempts.filter((a) => a.conceptId === concept.id);
@@ -106,19 +115,25 @@ app.get("/api/concepts/:id", (req, res) => {
 });
 
 app.post("/api/concepts/:id/attempts", async (req, res) => {
-  const concept = find(db.concepts, req.params.id, res, "概念");
+  const concept = find(db.concepts, req.params.id, res, "Concept");
   if (!concept) return;
   const transcript = String(req.body?.transcript || "").trim();
-  if (!transcript) return res.status(400).json({ error: "説明が空です" });
+  if (!transcript) return res.status(400).json({ error: "The explanation is empty." });
   const doc = db.docs.find((d) => d.id === concept.docId);
 
-  // 「正しくなるまで繰り返す」1サイクル分の履歴だけをAIに渡す
+  // Only the current "until it's correct" cycle is sent to the AI as history
   const all = db.attempts.filter((a) => a.conceptId === concept.id);
   const lastCorrect = all.findLastIndex((a) => a.result.verdict === "correct");
   const history = all.slice(lastCorrect + 1);
 
   try {
-    const result = await evaluateExplanation({ pdfPath: pdfPath(doc), concept, transcript, history });
+    const result = await evaluateExplanation({
+      pdfPath: pdfPath(doc),
+      concept,
+      transcript,
+      history,
+      lang: pickLang(req.body?.lang),
+    });
     const attempt = { id: newId(), conceptId: concept.id, docId: doc.id, transcript, result, createdAt: now() };
     db.attempts.push(attempt);
     concept.attempts += 1;
@@ -143,7 +158,7 @@ app.post("/api/concepts/:id/attempts", async (req, res) => {
   }
 });
 
-// --- フラッシュカード ---
+// --- Flashcards ---
 app.get("/api/cards", (req, res) => {
   let cards = db.cards;
   if (req.query.docId) cards = cards.filter((c) => c.docId === req.query.docId);
@@ -152,7 +167,7 @@ app.get("/api/cards", (req, res) => {
 });
 
 app.put("/api/cards/:id", (req, res) => {
-  const card = find(db.cards, req.params.id, res, "カード");
+  const card = find(db.cards, req.params.id, res, "Card");
   if (!card) return;
   for (const key of ["front", "back"]) if (typeof req.body?.[key] === "string") card[key] = req.body[key];
   card.updatedAt = now();
@@ -167,17 +182,17 @@ app.delete("/api/cards/:id", (req, res) => {
 });
 
 app.post("/api/cards/:id/review", (req, res) => {
-  const card = find(db.cards, req.params.id, res, "カード");
+  const card = find(db.cards, req.params.id, res, "Card");
   if (!card) return;
   const rating = req.body?.rating;
-  if (!RATINGS.includes(rating)) return res.status(400).json({ error: "評価が不正です" });
+  if (!RATINGS.includes(rating)) return res.status(400).json({ error: "Invalid rating." });
   Object.assign(card, schedule(card, rating));
   db.reviews.push({ id: newId(), cardId: card.id, docId: card.docId, rating, createdAt: now() });
   save();
   res.json(withCardInfo(card));
 });
 
-// --- カレンダー用の活動ログ ---
+// --- Activity log for the calendar ---
 app.get("/api/activity", (_req, res) => {
   res.json({
     attempts: db.attempts.map((a) => ({ at: a.createdAt, verdict: a.result.verdict, conceptId: a.conceptId })),
@@ -189,19 +204,29 @@ app.get("/api/activity", (_req, res) => {
 function sendError(res, err) {
   if (err instanceof AIError) return res.status(502).json({ error: err.message });
   console.error(err);
-  res.status(500).json({ error: "サーバーエラーが発生しました" });
+  res.status(500).json({ error: "Something went wrong on the server." });
 }
 
 app.use((err, _req, res, _next) => {
   if (err instanceof multer.MulterError) {
-    const msg = err.code === "LIMIT_FILE_SIZE" ? "PDFは32MBまでです" : "アップロードに失敗しました";
+    const msg = err.code === "LIMIT_FILE_SIZE" ? "PDFs can be up to 32 MB." : "Upload failed.";
     return res.status(400).json({ error: msg });
   }
   sendError(res, err);
 });
 
-const PORT = Number(process.env.PORT) || 3000;
-app.listen(PORT, () => {
-  const label = { "claude-code": "Claude Code（Proプランのログインを使用）", api: "Claude API（従量課金）", mock: "モック" }[PROVIDER];
-  console.log(`ONSEI_LRN: http://localhost:${PORT}  AI: ${label}`);
+const LABELS = { "claude-code": "Claude Code (your Claude Pro/Max login)", api: "Claude API (pay-as-you-go)", mock: "mock (no AI)" };
+
+const server = app.listen(PORT, HOST, () => {
+  console.log(`ONSEI_LRN: http://localhost:${PORT}  AI: ${LABELS[PROVIDER]}`);
+});
+
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    // Usually another copy of the app (e.g. the background service) is already running.
+    // Exit with 0 so the background service does not keep retrying.
+    console.log(`Port ${PORT} is already in use. ONSEI_LRN is probably already running: open http://localhost:${PORT}`);
+    process.exit(0);
+  }
+  throw err;
 });
