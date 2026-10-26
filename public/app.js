@@ -209,9 +209,23 @@ function createDictation({ textarea, interimEl, onChange, onEndPhrase, onStart }
 }
 
 // ---------------- Decks ----------------
+// Checks the Claude connection once per server start and shows a banner if it fails
+let aiChecking = null;
+async function aiBanner() {
+  let ai = await api("/api/ai").catch(() => null);
+  if (ai && ai.provider === "claude-code" && !ai.status.checkedAt) {
+    aiChecking ||= api("/api/ai/test", { method: "POST" }).catch(() => null);
+    ai = (await aiChecking) || ai;
+  }
+  const el = document.getElementById("ai-banner");
+  if (!el || !ai || ai.status.ok !== false) return;
+  el.innerHTML = `<div class="banner">${esc(ai.status.message)} <a href="#/settings">Open Claude connection</a></div>`;
+}
+
 async function renderDecks() {
   const docs = await api("/api/docs");
   view.innerHTML = `
+    <div id="ai-banner"></div>
     <h1>Decks</h1>
     ${
       docs.length
@@ -236,6 +250,7 @@ async function renderDecks() {
     </div>
     <p id="upload-status" class="subtle small center"></p>`;
 
+  aiBanner();
   document.getElementById("pdf").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -251,6 +266,7 @@ async function renderDecks() {
       status.textContent = "";
       e.target.value = "";
       toast(err.message, true);
+      aiBanner();
     }
   });
 }
@@ -887,8 +903,8 @@ function firstIntervalDays(retention) {
 }
 
 async function renderSettings() {
-  const [health, rem, prog] = await Promise.all([
-    api("/api/health").catch(() => ({})),
+  const [ai, rem, prog] = await Promise.all([
+    api("/api/ai").catch(() => ({ status: {} })),
     api("/api/reminders").catch(() => ({})),
     api("/api/progress").catch(() => ({})),
   ]);
@@ -911,8 +927,44 @@ async function renderSettings() {
       : "";
   const webcal = `webcal://${location.host}/calendar.ics`;
 
+  const st = ai.status || {};
+  const aiLine =
+    st.ok === true
+      ? `<div class="small review">✓ Connected to Claude <span class="subtle">(checked ${new Date(st.checkedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })})</span></div>`
+      : st.ok === false
+        ? `<div class="small learn">${esc(st.message)}</div>${st.detail ? `<details class="small"><summary>Details</summary><pre class="detail">${esc(st.detail)}</pre></details>` : ""}`
+        : `<div class="small subtle">Not checked yet.</div>`;
+  const source = { app: "Using the token you saved here.", env: "Using CLAUDE_CODE_OAUTH_TOKEN from the environment." }[ai.tokenSource] || "Using your Claude Code login.";
+
   view.innerHTML = `
     <h1>Settings</h1>
+
+    <h2>Claude connection</h2>
+    <div class="panel form">
+      <div class="small">${esc(AI_LABELS[ai.provider] || "Unknown")} · ${esc(source)}</div>
+      ${aiLine}
+      <div class="bottom-bar left">
+        <button id="ai-test">Test connection</button>
+        ${ai.tokenSource === "app" ? `<button id="ai-clear">Remove saved token</button>` : ""}
+      </div>
+      ${
+        ai.provider === "claude-code"
+          ? `<details ${st.ok === false ? "open" : ""}>
+              <summary>Connect with a token (fixes “not logged in” / authentication errors)</summary>
+              <ol class="steps small">
+                <li>Open <b>Terminal</b> and run: <code id="setup-cmd">claude setup-token</code> <button class="small-btn" id="copy-cmd">Copy</button></li>
+                <li>Approve access in the browser window that opens. Terminal then prints a token starting with <code>sk-ant-oat</code>.</li>
+                <li>Paste it here:</li>
+              </ol>
+              <div class="row-input">
+                <input type="password" id="ai-token" placeholder="sk-ant-oat…" autocomplete="off" spellcheck="false">
+                <button id="ai-save" class="primary">Save &amp; test</button>
+              </div>
+              <div class="subtle small">The background app cannot always read your Claude Code login from the macOS Keychain; this token replaces it. It uses your Claude Pro/Max plan, lasts one year, and is stored only on this Mac (readable by your user account only).</div>
+            </details>`
+          : ""
+      }
+    </div>
 
     <h2>Explaining</h2>
     <div class="panel form">
@@ -975,13 +1027,45 @@ async function renderSettings() {
     </div>
 
     <h2>Data</h2>
-    <p class="small"><a href="/api/export/anki.txt" download>Export all cards for Anki</a> <span class="subtle">(in Anki: File → Import)</span></p>
-
-    <h2>AI</h2>
-    <p class="subtle">${esc(AI_LABELS[health.provider] || "Unknown")}</p>`;
+    <p class="small"><a href="/api/export/anki.txt" download>Export all cards for Anki</a> <span class="subtle">(in Anki: File → Import)</span></p>`;
 
   const $ = (id) => document.getElementById(id);
   const saved = () => toast("Saved.");
+
+  const busy = (btn, label) => {
+    btn.disabled = true;
+    btn.textContent = label;
+  };
+  $("ai-test").onclick = async (e) => {
+    busy(e.target, "Testing…");
+    const r = await api("/api/ai/test", { method: "POST" }).catch((err) => (toast(err.message, true), null));
+    if (r) toast(r.status.ok ? "Connected to Claude." : r.status.message, !r.status.ok);
+    renderSettings();
+  };
+  $("ai-clear")?.addEventListener("click", async () => {
+    await api("/api/ai/token", { method: "DELETE" });
+    toast("Removed the saved token.");
+    renderSettings();
+  });
+  $("copy-cmd")?.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText("claude setup-token");
+      toast("Copied. Paste it into Terminal.");
+    } catch {
+      toast("Select the command and copy it by hand.", true);
+    }
+  });
+  $("ai-save")?.addEventListener("click", async (e) => {
+    const token = $("ai-token").value;
+    busy(e.target, "Testing…");
+    try {
+      const r = await api("/api/ai/token", { json: { token } });
+      toast(r.status.ok ? "Connected to Claude." : r.status.message, !r.status.ok);
+    } catch (err) {
+      toast(err.message, true);
+    }
+    renderSettings();
+  });
 
   $("lang").onchange = async (e) => (await saveSettings({ lang: e.target.value })) && (saved(), renderSettings());
   $("auto").onchange = async (e) => (await saveSettings({ autoSubmit: e.target.checked })) && saved();

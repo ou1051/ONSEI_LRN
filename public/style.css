@@ -271,3 +271,11 @@ input[type="time"] { width: 100%; font: inherit; color: var(--fg); background: v
 @media (max-width: 640px) {
   .row2 { grid-template-columns: 1fr; }
 }
+
+/* Claude connection */
+.banner { border: 1px solid var(--state-learn); color: var(--fg); background: var(--canvas-elevated); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 12px; }
+ol.steps { padding-left: 20px; margin: 8px 0; }
+ol.steps li { margin-bottom: 4px; }
+.row-input { display: flex; gap: 8px; }
+.row-input input { flex: 1; min-width: 0; }
+pre.detail { white-space: pre-wrap; word-break: break-word; font-size: 0.85em; background: var(--canvas-inset); border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 6px 8px; }

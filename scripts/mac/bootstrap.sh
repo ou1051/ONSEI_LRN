@@ -73,4 +73,6 @@ cat <<EOF
 All set. Bookmark this and open it any time:  http://localhost:3000
 If you have not logged in to Claude Code yet: open Terminal, run  claude , log in with your
 Claude Pro/Max account, then type /exit.
+If adding a PDF then says "not logged in" or shows an authentication error, open
+Settings → Claude connection in the app and follow the steps there (claude setup-token).
 EOF

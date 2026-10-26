@@ -4,7 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { db, save, newId, now, PDF_DIR } from "./lib/db.js";
-import { extractConcepts, evaluateExplanation, AIError, PROVIDER, LANGUAGES } from "./lib/ai.js";
+import { extractConcepts, evaluateExplanation, testConnection, aiStatus, AIError, PROVIDER, LANGUAGES } from "./lib/ai.js";
+import { saveClaudeToken, clearClaudeToken, tokenSource } from "./lib/secrets.js";
 import { schedule, preview, describeInterval, memoryInfo, migrateCard, rescheduleDue, gradeFromAttempts, RATINGS } from "./lib/srs.js";
 import { getSettings, updateSettings } from "./lib/settings.js";
 import * as reminders from "./lib/reminders.js";
@@ -283,6 +284,35 @@ app.get("/api/export/anki.txt", (req, res) => {
   const lines = ["#separator:tab", "#html:true", "#notetype:Basic", "#deck column:3", "#tags column:4"];
   for (const c of cards) lines.push([field(c.front), field(c.back), deckName(c.docId), "onsei_lrn"].join("\t"));
   res.attachment("onsei_lrn_cards.txt").type("text/plain; charset=utf-8").send(lines.join("\n") + "\n");
+});
+
+// --- Claude connection ---
+const aiInfo = () => ({ provider: PROVIDER, tokenSource: tokenSource(), status: aiStatus });
+
+app.get("/api/ai", (_req, res) => res.json(aiInfo()));
+
+app.post("/api/ai/test", async (_req, res) => {
+  await testConnection();
+  res.json(aiInfo());
+});
+
+app.post("/api/ai/token", async (req, res) => {
+  try {
+    saveClaudeToken(req.body?.token);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  await testConnection();
+  if (aiStatus.code === "auth") {
+    clearClaudeToken();
+    return res.status(400).json({ error: "Claude did not accept that token. Run `claude setup-token` again and paste the new token.", ...aiInfo() });
+  }
+  res.json(aiInfo());
+});
+
+app.delete("/api/ai/token", (_req, res) => {
+  clearClaudeToken();
+  res.json(aiInfo());
 });
 
 // --- Settings ---

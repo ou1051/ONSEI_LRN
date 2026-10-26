@@ -49,7 +49,7 @@ test("grading: history and language reach the prompt; output is normalized", asy
 
 test("Claude Code errors become clear messages", async () => {
   process.env.FAKE_CLAUDE_MODE = "error";
-  await assert.rejects(ai.extractConcepts(pdf, "en"), (e) => e instanceof ai.AIError && /log in/.test(e.message));
+  await assert.rejects(ai.extractConcepts(pdf, "en"), (e) => e instanceof ai.AIError && e.code === "auth" && /Claude connection/.test(e.message));
   process.env.FAKE_CLAUDE_MODE = "garbage";
   await assert.rejects(ai.extractConcepts(pdf, "en"), /Claude Code failed/);
   process.env.FAKE_CLAUDE_MODE = "noresult";
@@ -70,4 +70,69 @@ test("normalizeEvaluation guards against odd model output", () => {
   assert.deepEqual(r.jargon, []);
   assert.equal(r.card_back, "", "no card text for an incorrect verdict");
   assert.equal(r.card_front, "What is A?");
+});
+
+test("auth failures are recognized (JSON or plain text) and point to the token fix", async () => {
+  for (const mode of ["notloggedin", "plaintext-auth", "error"]) {
+    process.env.FAKE_CLAUDE_MODE = mode;
+    await assert.rejects(ai.extractConcepts(pdf, "en"), (e) => e.code === "auth" && /Settings → Claude connection/.test(e.message) && /claude setup-token/.test(e.message), mode);
+    assert.equal(ai.aiStatus.ok, false);
+    assert.equal(ai.aiStatus.code, "auth");
+    assert.match(ai.aiStatus.detail, /Please run \/login/);
+  }
+});
+
+test("usage limits get their own message", async () => {
+  process.env.FAKE_CLAUDE_MODE = "usage";
+  await assert.rejects(ai.extractConcepts(pdf, "en"), (e) => e.code === "usage_limit" && /usage limit/.test(e.message));
+});
+
+test("testConnection: a tiny request with no tools; status reflects the result", async () => {
+  process.env.FAKE_CLAUDE_MODE = "";
+  const s = await ai.testConnection();
+  assert.equal(s.ok, true);
+  assert.equal(s.code, null);
+  const call = JSON.parse(fs.readFileSync(log, "utf8"));
+  assert.equal(call.args[call.args.indexOf("--tools") + 1], "", "all tools disabled");
+  assert.ok(!call.args.includes("--json-schema"));
+  assert.match(call.prompt, /Reply with the single word OK/);
+
+  process.env.FAKE_CLAUDE_MODE = "notloggedin";
+  const bad = await ai.testConnection();
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, "auth");
+});
+
+test("a saved token is passed to Claude Code as CLAUDE_CODE_OAUTH_TOKEN and fixes the launchd login problem", async () => {
+  const secrets = await import("../../lib/secrets.js");
+  process.env.FAKE_CLAUDE_MODE = "needs-token";
+  secrets.clearClaudeToken();
+  assert.equal((await ai.testConnection()).code, "auth", "without a token: not logged in");
+
+  secrets.saveClaudeToken("  sk-ant-oat01-good-token-for-tests \n");
+  const s = await ai.testConnection();
+  assert.equal(s.ok, true);
+  assert.equal(JSON.parse(fs.readFileSync(log, "utf8")).token, "sk-ant-oat01-good-token-for-tests");
+  const r = await ai.extractConcepts(pdf, "en");
+  assert.equal(r.doc_title, "Fake deck");
+
+  secrets.saveClaudeToken("sk-ant-oat01-wrong-token-xxxxxxxx");
+  assert.equal((await ai.testConnection()).code, "auth", "a wrong token is an auth error too");
+  secrets.clearClaudeToken();
+});
+
+test("token storage: owner-only permissions, validation, source", async () => {
+  const secrets = await import("../../lib/secrets.js");
+  assert.throws(() => secrets.saveClaudeToken(""), /Paste the token/);
+  assert.throws(() => secrets.saveClaudeToken("short"), /does not look like a token/);
+  assert.throws(() => secrets.saveClaudeToken("sk-ant-oat01 with spaces inside it"), /does not look like a token/);
+  secrets.saveClaudeToken("sk-ant-oat01-abcdefghijklmnopqrstuvwxyz");
+  assert.equal(secrets.readClaudeToken(), "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz");
+  assert.equal(secrets.tokenSource(), "app");
+  const file = path.join(dataDir, "secrets", "claude-oauth-token");
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
+  secrets.clearClaudeToken();
+  assert.equal(secrets.readClaudeToken(), null);
+  assert.equal(secrets.tokenSource(), null);
 });

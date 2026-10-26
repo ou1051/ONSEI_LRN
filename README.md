@@ -20,6 +20,16 @@ Two one-time steps:
 
 Running the same command again updates the app. Your data is kept.
 
+## If adding a PDF says "not logged in" or shows an authentication error
+
+The app runs in the background, and macOS often doesn't let background programs read Claude Code's login from the Keychain. You only need to fix this once:
+
+1. Open **Settings → Claude connection** in the app.
+2. In Terminal, run `claude setup-token` and approve access in the browser. Terminal prints a token that starts with `sk-ant-oat`.
+3. Paste the token into Settings and press **Save & test**.
+
+The token uses your Claude Pro/Max plan, lasts one year, and is stored only on your Mac, readable only by your user account. **Test connection** shows the exact error if something else is wrong.
+
 ## How it works
 
 1. **Decks → Add PDF.** Claude reads the PDF and picks out the key concepts to explain.
@@ -125,7 +135,8 @@ npm run test:e2e   # browser tests (needs Playwright with Chromium)
 Project layout:
 
 - `server.js`: Express API (PDFs, grading, cards, settings, reminders, stats)
-- `lib/ai.js`: AI calls through the Claude Code CLI (`claude -p`) or the Claude API, with structured JSON output
+- `lib/ai.js`: AI calls through the Claude Code CLI (`claude -p`) or the Claude API, with structured JSON output, error diagnosis and a connection test
+- `lib/secrets.js`: the Claude Code token saved from Settings (file mode 0600)
 - `lib/srs.js`: forgetting-curve scheduler (FSRS-4.5 with interval fuzz)
 - `lib/reminders.js`: Apple Reminders sync (JavaScript for Automation) and the iCalendar feed
 - `lib/stats.js`, `lib/settings.js`, `lib/db.js`: stats, validated settings, and the JSON store
